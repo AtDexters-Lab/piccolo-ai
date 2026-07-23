@@ -52,7 +52,6 @@ docker run --rm \
   -e PICCOLO_AI_API_TOKEN='replace-with-a-long-random-token' \
   -e PICCOLO_AI_TARGET_DEVICE=CPU \
   -v /absolute/path/to/model:/models/model:ro \
-  -v piccolo-ai-ovms-cache:/var/cache/ovms \
   piccolo-ai-ovms:dev
 ```
 

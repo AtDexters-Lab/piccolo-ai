@@ -11,7 +11,6 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	for _, name := range []string{
 		"PICCOLO_AI_OVMS_BINARY",
 		"PICCOLO_AI_MODEL_PATH",
-		"PICCOLO_AI_CACHE_DIR",
 		"PICCOLO_AI_TARGET_DEVICE",
 		"PICCOLO_AI_LOG_LEVEL",
 	} {
@@ -22,7 +21,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Binary != "/ovms/bin/ovms" || cfg.ModelPath != "/models/model" || cfg.CacheDir != "/var/cache/ovms" {
+	if cfg.Binary != "/ovms/bin/ovms" || cfg.ModelPath != "/models/model" {
 		t.Fatalf("unexpected defaults: %#v", cfg)
 	}
 	if cfg.TargetDevice != "AUTO:GPU,CPU" || cfg.LogLevel != "INFO" {
@@ -43,20 +42,16 @@ func TestConfigFromEnvValidatesControlledValues(t *testing.T) {
 	}
 }
 
-func TestPrepareRequiresDirectoryModelAndWritableCache(t *testing.T) {
+func TestPrepareRequiresDirectoryModel(t *testing.T) {
 	root := t.TempDir()
 	model := filepath.Join(root, "model")
-	cache := filepath.Join(root, "cache")
 	if err := os.Mkdir(model, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := Config{ModelPath: model, CacheDir: cache}
+	cfg := Config{ModelPath: model}
 	if err := cfg.Prepare(); err != nil {
 		t.Fatal(err)
-	}
-	if info, err := os.Stat(cache); err != nil || !info.IsDir() {
-		t.Fatalf("cache directory was not prepared: info=%v err=%v", info, err)
 	}
 
 	cfg.ModelPath = filepath.Join(root, "missing")
@@ -68,7 +63,6 @@ func TestPrepareRequiresDirectoryModelAndWritableCache(t *testing.T) {
 func TestArgsKeepStableProviderIdentity(t *testing.T) {
 	cfg := Config{
 		ModelPath:    "/model",
-		CacheDir:     "/cache",
 		TargetDevice: "GPU",
 		LogLevel:     "ERROR",
 	}
@@ -79,7 +73,6 @@ func TestArgsKeepStableProviderIdentity(t *testing.T) {
 		"--rest_bind_address", "0.0.0.0",
 		"--task", "text_generation",
 		"--target_device", "GPU",
-		"--cache_dir", "/cache",
 		"--file_system_poll_wait_seconds", "0",
 		"--log_level", "ERROR",
 	}
