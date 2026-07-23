@@ -151,7 +151,59 @@ func TestProxyStreamsWithoutBuffering(t *testing.T) {
 	close(releaseSecond)
 }
 
-func TestHealthReflectsBackendReadiness(t *testing.T) {
+func TestHealthReflectsBackendLiveness(t *testing.T) {
+	live := true
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/health/live" {
+			http.NotFound(w, r)
+			return
+		}
+		if !live {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("live health status = %d", response.Code)
+	}
+
+	live = false
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("not-live health status = %d", response.Code)
+	}
+}
+
+func TestHealthFailsWhenInternalBackendIsUnavailable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	listener.Close()
+	target, err := url.Parse("http://" + address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(Config{APIToken: testToken, Backend: target, ModelName: "piccolo-chat", Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d", response.Code)
+	}
+}
+
+func TestReadinessReflectsBackendReadiness(t *testing.T) {
 	ready := false
 	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v2/models/piccolo-chat/ready" {
@@ -165,7 +217,7 @@ func TestHealthReflectsBackendReadiness(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
@@ -177,6 +229,52 @@ func TestHealthReflectsBackendReadiness(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("ready status = %d", response.Code)
+	}
+}
+
+func TestUnavailableHandlerReturnsRetryableOpenAIError(t *testing.T) {
+	handler := NewUnavailableHandler()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v3/chat/completions", strings.NewReader(`{}`)))
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if response.Header().Get("Retry-After") != "5" {
+		t.Fatalf("Retry-After = %q", response.Header().Get("Retry-After"))
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Code != "accelerator_unavailable" {
+		t.Fatalf("error code = %q", body.Error.Code)
+	}
+
+	livenessResponse := httptest.NewRecorder()
+	handler.ServeHTTP(livenessResponse, httptest.NewRequest(http.MethodGet, "/v2/health/live", nil))
+	if livenessResponse.Code != http.StatusOK {
+		t.Fatalf("standby liveness status = %d", livenessResponse.Code)
+	}
+}
+
+func TestStandbyIsHealthyButNotReady(t *testing.T) {
+	handler := newTestHandler(t, NewUnavailableHandler())
+
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d", health.Code)
+	}
+
+	readiness := httptest.NewRecorder()
+	handler.ServeHTTP(readiness, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if readiness.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d", readiness.Code)
 	}
 }
 

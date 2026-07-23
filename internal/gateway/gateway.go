@@ -26,14 +26,14 @@ type Config struct {
 }
 
 type Handler struct {
-	token        string
-	backend      *url.URL
-	modelName    string
-	version      string
-	proxy        *httputil.ReverseProxy
-	healthClient *http.Client
-	limits       Limits
-	requestSlots chan struct{}
+	token         string
+	backend       *url.URL
+	modelName     string
+	version       string
+	proxy         *httputil.ReverseProxy
+	backendClient *http.Client
+	limits        Limits
+	requestSlots  chan struct{}
 }
 
 func New(config Config) (*Handler, error) {
@@ -69,7 +69,7 @@ func New(config Config) (*Handler, error) {
 		version:      config.Version,
 		limits:       limits,
 		requestSlots: make(chan struct{}, limits.MaxConcurrentRequests),
-		healthClient: &http.Client{
+		backendClient: &http.Client{
 			Transport: transport,
 			Timeout:   2 * time.Second,
 		},
@@ -87,6 +87,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/healthz":
 		h.serveHealth(w, r)
+	case r.URL.Path == "/readyz":
+		h.serveReadiness(w, r)
 	case r.URL.Path == "/":
 		h.serveRoot(w, r)
 	case r.URL.Path == "/v3" || strings.HasPrefix(r.URL.Path, "/v3/"):
@@ -187,13 +189,27 @@ func (h *Handler) serveHealth(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error", "method_not_allowed")
 		return
 	}
-	healthURL := h.backend.ResolveReference(&url.URL{Path: "/v2/models/" + h.modelName + "/ready"})
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, healthURL.String(), nil)
+	status, healthy := h.intrinsicHealth(r.Context())
+	if !healthy {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": status})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": status})
+}
+
+func (h *Handler) serveReadiness(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error", "method_not_allowed")
+		return
+	}
+	readinessURL := h.backend.ResolveReference(&url.URL{Path: "/v2/models/" + h.modelName + "/ready"})
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, readinessURL.String(), nil)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
 		return
 	}
-	response, err := h.healthClient.Do(request)
+	response, err := h.backendClient.Do(request)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
 		return
@@ -204,6 +220,37 @@ func (h *Handler) serveHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+func (h *Handler) intrinsicHealth(ctx context.Context) (string, bool) {
+	livenessURL := h.backend.ResolveReference(&url.URL{Path: "/v2/health/live"})
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, livenessURL.String(), nil)
+	if err != nil {
+		return "unhealthy", false
+	}
+	response, err := h.backendClient.Do(request)
+	if err != nil {
+		return "unhealthy", false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "unhealthy", false
+	}
+	return "healthy", true
+}
+
+// NewUnavailableHandler exposes the capability listener while an external
+// accelerator grant is unavailable. It deliberately has no provider
+// credential because Piccolod owns access to the private capability route.
+func NewUnavailableHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/v2/health/live" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Retry-After", "5")
+		writeOpenAIError(w, http.StatusServiceUnavailable, "Inference accelerator unavailable", "server_error", "accelerator_unavailable")
+	})
 }
 
 func (h *Handler) serveRoot(w http.ResponseWriter, r *http.Request) {
