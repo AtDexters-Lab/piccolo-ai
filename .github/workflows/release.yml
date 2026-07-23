@@ -1,0 +1,127 @@
+name: Publish OVMS image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-ovms-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/atdexters-lab/piccolo-ai-ovms
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Release tags must point to a commit on main" >&2
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Unit tests
+        run: go test ./... -count=1 -timeout=60s
+
+      - name: Race detector
+        run: go test -race ./... -count=1 -timeout=120s
+
+      - name: Static analysis
+        run: go vet ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build validation image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: backends/ovms/Dockerfile
+          load: true
+          push: false
+          tags: piccolo-ai-ovms:validate
+          build-args: |
+            VERSION=validate
+            COMMIT=${{ github.sha }}
+
+      - name: Verify image contract
+        run: |
+          docker run --rm --entrypoint sh piccolo-ai-ovms:validate -c \
+            'test "$(id -u)" = 5000 && test "$(id -g)" = 5000 && id -G | grep -Eq "(^| )44( |$)"'
+          docker run --rm piccolo-ai-ovms:validate version
+
+  publish:
+    runs-on: ubuntu-24.04
+    needs: validate
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,enable=${{ github.ref_type == 'branch' }}
+            type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.title=Piccolo AI OVMS Provider
+            org.opencontainers.image.description=OpenAI-compatible local inference provider for Piccolo OS
+            org.opencontainers.image.source=https://github.com/AtDexters-Lab/piccolo-ai
+            org.opencontainers.image.licenses=AGPL-3.0-only
+
+      - name: Build and publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: backends/ovms/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.metadata.outputs.version }}
+            COMMIT=${{ github.sha }}
+          provenance: mode=max
+          sbom: true

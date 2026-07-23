@@ -1,0 +1,9 @@
+.git
+.github
+bin
+coverage.out
+dist
+docs
+models
+*.md
+!THIRD_PARTY_NOTICES.md
