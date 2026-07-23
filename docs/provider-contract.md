@@ -28,7 +28,8 @@ long-running generation payloads.
 
 - The externally visible model identifier is always `piccolo-chat`.
 - The selected model artifact is mounted read-only at `/models/model`.
-- Backend compilation data is reconstructible and written to `/var/cache/ovms`.
+- OVMS compilation caching is disabled; process restarts recompile the mounted
+  model instead of maintaining a second model-derived cache on disk.
 - A model update changes the mounted artifact, not the provider image contract.
 
 ## Configuration
@@ -38,7 +39,6 @@ long-running generation payloads.
 | `PICCOLO_AI_API_TOKEN` | Yes | none | Bearer token accepted by the port 8000 gateway; minimum 24 characters |
 | `PICCOLO_AI_TARGET_DEVICE` | No | `AUTO:GPU,CPU` | OVMS/OpenVINO target device expression |
 | `PICCOLO_AI_MODEL_PATH` | No | `/models/model` | Read-only model directory |
-| `PICCOLO_AI_CACHE_DIR` | No | `/var/cache/ovms` | Writable compilation cache directory |
 | `PICCOLO_AI_LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, or `ERROR` |
 | `PICCOLO_AI_MAX_REQUEST_BYTES` | No | `268435456` | Maximum request body size in bytes |
 | `PICCOLO_AI_MAX_CONCURRENT_REQUESTS` | No | `32` | Maximum admitted `/v3` requests; excess requests receive `429` |

@@ -24,6 +24,10 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
+# OVMS implicitly enables compilation caching when this path exists. Fail the
+# build if a future base image would silently violate the no-cache contract.
+RUN test ! -e /opt/cache
+
 LABEL org.opencontainers.image.title="Piccolo AI OVMS Provider" \
       org.opencontainers.image.description="OpenAI-compatible local inference provider for Piccolo OS" \
       org.opencontainers.image.source="https://github.com/AtDexters-Lab/piccolo-ai" \
@@ -32,10 +36,8 @@ LABEL org.opencontainers.image.title="Piccolo AI OVMS Provider" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
-USER root
 COPY --from=build --chown=5000:5000 /out/piccolo-ai-ovms /usr/local/bin/piccolo-ai-ovms
 COPY --chown=5000:5000 LICENSE THIRD_PARTY_NOTICES.md /licenses/piccolo-ai/
-RUN mkdir -p /var/cache/ovms && chown 5000:5000 /var/cache/ovms
 
 USER ovms
 EXPOSE 8000 8001
