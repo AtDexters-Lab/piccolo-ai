@@ -111,3 +111,56 @@ func TestRunSharesOneShutdownBudgetBetweenGatewayAndBackend(t *testing.T) {
 		t.Fatalf("shutdown took %s, want one %s overall budget", elapsed, shutdownBudget)
 	}
 }
+
+func TestRunStandbyServesBothListenersUntilCancellation(t *testing.T) {
+	gatewayListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilityListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		gatewayListener.Close()
+		t.Fatal(err)
+	}
+	gatewayServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})}
+	capabilityServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunStandby(ctx, gatewayListener, gatewayServer, capabilityListener, capabilityServer, time.Second)
+	}()
+
+	waitForStatus(t, "http://"+gatewayListener.Addr().String(), http.StatusOK)
+	waitForStatus(t, "http://"+capabilityListener.Addr().String(), http.StatusServiceUnavailable)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunStandby() after cancellation = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("standby provider did not stop after cancellation")
+	}
+}
+
+func waitForStatus(t *testing.T, endpoint string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		response, err := http.Get(endpoint)
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == want {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s did not return %d", endpoint, want)
+}

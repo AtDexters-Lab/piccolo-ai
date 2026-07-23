@@ -71,7 +71,6 @@ func run(args []string) error {
 	if err := backendConfig.Prepare(); err != nil {
 		return err
 	}
-	command := backendConfig.Command()
 
 	listener, err := net.Listen("tcp", "0.0.0.0:8000")
 	if err != nil {
@@ -81,6 +80,30 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if accelerator := backendConfig.UnavailableRequiredAccelerator(); accelerator != "" {
+		capabilityListener, err := net.Listen("tcp", "0.0.0.0:8001")
+		if err != nil {
+			listener.Close()
+			return fmt.Errorf("listen on capability port: %w", err)
+		}
+		capabilityServer := gateway.NewServer(
+			"0.0.0.0:8001",
+			gateway.NewUnavailableHandler(),
+			limits.MaxRequestUploadDuration,
+			limits.MaxRequestDuration,
+		)
+		log.Printf(
+			"starting Piccolo AI %s (%s) in healthy standby, model=%s target_device=%s waiting_for=%s",
+			version,
+			commit,
+			ovms.ModelName,
+			backendConfig.TargetDevice,
+			accelerator,
+		)
+		return provider.RunStandby(ctx, listener, server, capabilityListener, capabilityServer, 8*time.Second)
+	}
+
+	command := backendConfig.Command()
 	log.Printf("starting Piccolo AI %s (%s), model=%s target_device=%s", version, commit, ovms.ModelName, backendConfig.TargetDevice)
 	return provider.Run(ctx, command, listener, server, 8*time.Second)
 }

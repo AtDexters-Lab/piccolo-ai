@@ -15,10 +15,14 @@ runtime. Model weights are not baked into the image. Piccolod mounts a selected
 Hugging Face or OCI artifact read-only at `/models/model`.
 
 ```text
-remote client --Bearer token--> :8000 gateway --> :8001 OVMS
-                                                    ^
-Piccolod private capability ingress ----------------+
+remote client --Bearer token--> :8000 gateway -----+
+                                                    v
+Piccolod private capability ingress --> :8001 capability surface --> OVMS
 ```
+
+When a configured accelerator has not yet been granted, the capability surface
+stays up and returns `503` while the application remains healthy. Piccolod can
+then commit and recreate the selected provider with its accelerator devices.
 
 The public model name is always `piccolo-chat`. See
 [`docs/provider-contract.md`](docs/provider-contract.md) for the complete port,
@@ -61,6 +65,9 @@ Then query the stable model alias:
 curl http://127.0.0.1:8000/v3/models \
   -H 'Authorization: Bearer replace-with-a-long-random-token'
 ```
+
+`/healthz` reports intrinsic provider health. `/readyz` reports whether the
+model can currently serve inference.
 
 Port `8001` is published in this example only for direct local verification. A
 Piccolo installation routes it through the protected capability listener.
