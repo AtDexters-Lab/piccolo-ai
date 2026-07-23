@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Unit tests
+        run: go test ./... -count=1 -timeout=60s
+
+      - name: Race detector
+        run: go test -race ./... -count=1 -timeout=120s
+
+      - name: Static analysis
+        run: go vet ./...
+
+  container:
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build OVMS provider
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: backends/ovms/Dockerfile
+          load: true
+          push: false
+          tags: piccolo-ai-ovms:ci
+          build-args: |
+            VERSION=ci
+            COMMIT=${{ github.sha }}
+
+      - name: Verify image contract
+        run: |
+          docker run --rm --entrypoint sh piccolo-ai-ovms:ci -c \
+            'test "$(id -u)" = 5000 && test "$(id -g)" = 5000 && id -G | grep -Eq "(^| )44( |$)"'
+          docker run --rm piccolo-ai-ovms:ci version

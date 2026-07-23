@@ -1,0 +1,7 @@
+.idea/
+.vscode/
+bin/
+coverage.out
+dist/
+models/
+*.log
