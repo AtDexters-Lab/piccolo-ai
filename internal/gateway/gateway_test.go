@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -149,6 +150,844 @@ func TestProxyStreamsWithoutBuffering(t *testing.T) {
 		t.Fatalf("first streamed line = %q", line)
 	}
 	close(releaseSecond)
+}
+
+func TestStreamingRequestEmitsHeartbeatBeforeBackendResponse(t *testing.T) {
+	backendStarted := make(chan struct{})
+	releaseBackend := make(chan struct{})
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(backendStarted)
+		<-releaseBackend
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: first\n\n")
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(releaseBackend)
+		}
+	}()
+
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	select {
+	case <-backendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("backend did not consume the request body")
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+	if contentType := response.Header.Get("Content-Type"); contentType != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
+	}
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != ": keepalive\n" {
+		t.Fatalf("first streamed line = %q, want heartbeat comment", line)
+	}
+	if line, err = reader.ReadString('\n'); err != nil || line != "\n" {
+		t.Fatalf("heartbeat terminator = %q, err=%v", line, err)
+	}
+
+	close(releaseBackend)
+	released = true
+	for {
+		line, err = reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line == "data: first\n" {
+			break
+		}
+	}
+}
+
+func TestUnaryRequestDoesNotEmitHeartbeat(t *testing.T) {
+	backendStarted := make(chan struct{})
+	releaseBackend := make(chan struct{})
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(backendStarted)
+		<-releaseBackend
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":false}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+
+	type requestResult struct {
+		response *http.Response
+		err      error
+	}
+	resultChannel := make(chan requestResult, 1)
+	go func() {
+		response, err := (&http.Client{Timeout: time.Second}).Do(request)
+		resultChannel <- requestResult{response: response, err: err}
+	}()
+
+	select {
+	case <-backendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("backend did not consume the request body")
+	}
+	select {
+	case result := <-resultChannel:
+		if result.response != nil {
+			result.response.Body.Close()
+		}
+		t.Fatalf("unary response arrived before backend release: %v", result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseBackend)
+	got := <-resultChannel
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	defer got.response.Body.Close()
+	if contentType := got.response.Header.Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+}
+
+func TestStreamingHeartbeatContinuesBetweenBackendEvents(t *testing.T) {
+	releaseBackend := make(chan struct{})
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("backend response writer does not support flushing")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: first\n\n")
+		flusher.Flush()
+		<-releaseBackend
+		_, _ = io.WriteString(w, "data: second\n\n")
+		flusher.Flush()
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(releaseBackend)
+		}
+	}()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	reader := bufio.NewReader(response.Body)
+	sawFirst := false
+	sawHeartbeatAfterFirst := false
+	deadline := time.Now().Add(time.Second)
+	for !sawHeartbeatAfterFirst && time.Now().Before(deadline) {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch line {
+		case "data: first\n":
+			sawFirst = true
+		case ": keepalive\n":
+			if sawFirst {
+				sawHeartbeatAfterFirst = true
+			}
+		}
+	}
+	if !sawHeartbeatAfterFirst {
+		t.Fatal("heartbeat was not emitted while backend stream was idle")
+	}
+
+	close(releaseBackend)
+	released = true
+}
+
+func TestStreamingHeartbeatDoesNotSplitBackendSSELine(t *testing.T) {
+	firstFlushed := make(chan struct{})
+	releaseRemainder := make(chan struct{})
+	releaseBackend := make(chan struct{})
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: part")
+		flusher.Flush()
+		close(firstFlushed)
+		<-releaseRemainder
+		_, _ = io.WriteString(w, "ial\n\n")
+		flusher.Flush()
+		<-releaseBackend
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	remainderReleased := false
+	backendReleased := false
+	defer func() {
+		if !remainderReleased {
+			close(releaseRemainder)
+		}
+		if !backendReleased {
+			close(releaseBackend)
+		}
+	}()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	select {
+	case <-firstFlushed:
+	case <-time.After(time.Second):
+		t.Fatal("backend did not flush partial SSE line")
+	}
+	time.Sleep(30 * time.Millisecond)
+	close(releaseRemainder)
+	remainderReleased = true
+
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "data: partial\n" {
+		t.Fatalf("backend SSE line was corrupted: %q", line)
+	}
+	if line, err = reader.ReadString('\n'); err != nil || line != "\n" {
+		t.Fatalf("backend event terminator = %q, err=%v", line, err)
+	}
+	line, err = reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != ": keepalive\n" {
+		t.Fatalf("line after idle backend event = %q, want heartbeat", line)
+	}
+
+	close(releaseBackend)
+	backendReleased = true
+}
+
+func TestStreamingHeartbeatDoesNotSplitBackendSSEEvent(t *testing.T) {
+	firstLineFlushed := make(chan struct{})
+	releaseRemainder := make(chan struct{})
+	releaseBackend := make(chan struct{})
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = io.WriteString(w, "event: message\n")
+		flusher.Flush()
+		close(firstLineFlushed)
+		<-releaseRemainder
+		_, _ = io.WriteString(w, "data: payload\n\n")
+		flusher.Flush()
+		<-releaseBackend
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	remainderReleased := false
+	backendReleased := false
+	defer func() {
+		if !remainderReleased {
+			close(releaseRemainder)
+		}
+		if !backendReleased {
+			close(releaseBackend)
+		}
+	}()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	select {
+	case <-firstLineFlushed:
+	case <-time.After(time.Second):
+		t.Fatal("backend did not flush first SSE event line")
+	}
+	time.Sleep(30 * time.Millisecond)
+	close(releaseRemainder)
+	remainderReleased = true
+
+	reader := bufio.NewReader(response.Body)
+	lines := []string{"event: message\n", "data: payload\n", "\n", ": keepalive\n"}
+	for _, want := range lines {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if line != want {
+			t.Fatalf("streamed line = %q, want %q", line, want)
+		}
+	}
+
+	close(releaseBackend)
+	backendReleased = true
+}
+
+func TestStreamingHeartbeatSurvivesInformationalBackendResponse(t *testing.T) {
+	releaseBackend := make(chan struct{})
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Interim", "yes")
+		w.WriteHeader(http.StatusContinue)
+		w.Header().Del("X-Interim")
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-releaseBackend
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: final\n\n")
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(releaseBackend)
+		}
+	}()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	request.Header.Set("Expect", "100-continue")
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if value := response.Header.Get("X-Interim"); value != "" {
+		t.Fatalf("final response retained informational header X-Interim=%q", value)
+	}
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != ": keepalive\n" {
+		t.Fatalf("first final-response line = %q, want heartbeat comment", line)
+	}
+	if line, err = reader.ReadString('\n'); err != nil || line != "\n" {
+		t.Fatalf("heartbeat terminator = %q, err=%v", line, err)
+	}
+
+	close(releaseBackend)
+	released = true
+	for {
+		line, err = reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line == "data: final\n" {
+			break
+		}
+	}
+}
+
+func TestStreamingHeartbeatRequestsIdentityEncoding(t *testing.T) {
+	observedEncoding := make(chan string, 1)
+	releaseBackend := make(chan struct{})
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		observedEncoding <- r.Header.Get("Accept-Encoding")
+		<-releaseBackend
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: final\n\n")
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(releaseBackend)
+		}
+	}()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	request.Header.Set("Accept-Encoding", "gzip")
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	select {
+	case encoding := <-observedEncoding:
+		if encoding != "identity" {
+			t.Fatalf("backend Accept-Encoding = %q, want identity", encoding)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backend did not receive request")
+	}
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != ": keepalive\n" {
+		t.Fatalf("first streamed line = %q, want heartbeat comment", line)
+	}
+
+	close(releaseBackend)
+	released = true
+}
+
+func TestStreamingHeartbeatRemovesBackendContentLength(t *testing.T) {
+	releaseBackend := make(chan struct{})
+	const backendEvent = "data: final\n\n"
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(backendEvent)))
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-releaseBackend
+		_, _ = io.WriteString(w, backendEvent)
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(releaseBackend)
+		}
+	}()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if contentLength := response.Header.Get("Content-Length"); contentLength != "" {
+		t.Fatalf("response Content-Length = %q, want empty", contentLength)
+	}
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != ": keepalive\n" {
+		t.Fatalf("first streamed line = %q, want heartbeat", line)
+	}
+
+	close(releaseBackend)
+	released = true
+	remainder, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(remainder), backendEvent) {
+		t.Fatalf("backend SSE event was truncated: %q", remainder)
+	}
+}
+
+func TestProxiedResponseForwardsBackendTrailers(t *testing.T) {
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Trailer", "X-Backend-Trailer")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+		w.Header().Set("X-Backend-Trailer", "complete")
+	}))
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":false}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if _, err := io.ReadAll(response.Body); err != nil {
+		t.Fatal(err)
+	}
+	if trailer := response.Trailer.Get("X-Backend-Trailer"); trailer != "complete" {
+		t.Fatalf("backend trailer = %q, want complete", trailer)
+	}
+}
+
+func TestEarlyStreamingHeartbeatForwardsBackendTrailers(t *testing.T) {
+	releaseBackend := make(chan struct{})
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-releaseBackend
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Trailer", "X-Backend-Trailer")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: final\n\n")
+		w.Header().Set("X-Backend-Trailer", "complete")
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(releaseBackend)
+		}
+	}()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != ": keepalive\n" {
+		t.Fatalf("first streamed line = %q, want heartbeat", line)
+	}
+
+	close(releaseBackend)
+	released = true
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatal(err)
+	}
+	if trailer := response.Trailer.Get("X-Backend-Trailer"); trailer != "complete" {
+		t.Fatalf("backend trailer = %q, want complete", trailer)
+	}
+}
+
+func TestHeartbeatRejectsEncodedBackendStreamAfterCommit(t *testing.T) {
+	response := httptest.NewRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := newHeartbeatResponseWriter(response, ctx, cancel, time.Second)
+	writer.writeMu.Lock()
+	writer.commitHeartbeatLocked()
+	writer.writeMu.Unlock()
+
+	request := httptest.NewRequest(http.MethodPost, "/v3/chat/completions", nil)
+	request = request.WithContext(context.WithValue(request.Context(), heartbeatWriterContextKey{}, writer))
+	backendResponse := &http.Response{
+		Status:     "200 OK",
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type":     {"text/event-stream"},
+			"Content-Encoding": {"gzip"},
+		},
+		Request: request,
+	}
+	if err := prepareHeartbeatResponse(backendResponse); err == nil {
+		t.Fatal("encoded backend stream was accepted after plaintext heartbeat")
+	}
+}
+
+func TestHeartbeatRejectsEncodedBackendStreamBeforeCommit(t *testing.T) {
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = io.WriteString(w, "encoded bytes")
+	}))
+	handler.streamHeartbeatInterval = time.Second
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"code":"backend_unavailable"`) {
+		t.Fatalf("unexpected error body: %s", response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "encoded bytes") {
+		t.Fatalf("encoded backend body leaked into response: %s", response.Body.String())
+	}
+}
+
+func TestEncodedBackendResponseDisablesLaterHeartbeat(t *testing.T) {
+	response := httptest.NewRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := newHeartbeatResponseWriter(response, ctx, cancel, 10*time.Millisecond)
+
+	request := httptest.NewRequest(http.MethodPost, "/v3/chat/completions", nil)
+	request = request.WithContext(context.WithValue(request.Context(), heartbeatWriterContextKey{}, writer))
+	backendResponse := &http.Response{
+		Status:     "200 OK",
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type":     {"text/event-stream"},
+			"Content-Encoding": {"gzip"},
+		},
+		Request: request,
+	}
+	if err := prepareHeartbeatResponse(backendResponse); err != nil {
+		t.Fatalf("response-first encoding check returned error before stream detection: %v", err)
+	}
+
+	writer.enable(true)
+	time.Sleep(30 * time.Millisecond)
+	writer.stop()
+	if body := response.Body.String(); body != "" {
+		t.Fatalf("heartbeat started after encoded response was accepted: %q", body)
+	}
+}
+
+func TestStreamingHeartbeatFramesDelayedBackendErrorAsSSE(t *testing.T) {
+	releaseBackend := make(chan struct{})
+	handler := newTestHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-releaseBackend
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid image"}}`)
+	}))
+	handler.streamHeartbeatInterval = 10 * time.Millisecond
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(releaseBackend)
+		}
+	}()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v3/chat/completions",
+		strings.NewReader(`{"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response, err := (&http.Client{Timeout: time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != ": keepalive\n" {
+		t.Fatalf("first streamed line = %q, want heartbeat comment", line)
+	}
+	if line, err = reader.ReadString('\n'); err != nil || line != "\n" {
+		t.Fatalf("heartbeat terminator = %q, err=%v", line, err)
+	}
+
+	close(releaseBackend)
+	released = true
+	remainder, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(remainder), "event: error\ndata: ") {
+		t.Fatalf("delayed backend error is not SSE-framed: %q", remainder)
+	}
+	if !strings.Contains(string(remainder), `"code":"backend_unavailable"`) {
+		t.Fatalf("unexpected SSE error payload: %q", remainder)
+	}
+	if strings.Contains(string(remainder), "invalid image") {
+		t.Fatalf("raw backend JSON leaked into SSE stream: %q", remainder)
+	}
+}
+
+func TestStreamFlagScannerRecognizesOnlyFinalTopLevelBoolean(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "true", body: `{"stream":true}`, want: true},
+		{name: "false", body: `{"stream":false}`},
+		{name: "nested", body: `{"input":{"stream":true}}`},
+		{name: "string content", body: `{"input":"\"stream\":true","stream":false}`},
+		{name: "last duplicate wins true", body: `{"stream":false,"stream":true}`, want: true},
+		{name: "last duplicate wins false", body: `{"stream":true,"stream":false}`},
+		{name: "non boolean", body: `{"stream":"true"}`},
+		{name: "whitespace within boolean", body: `{"stream":tr ue}`},
+		{name: "trailing comma", body: `{"stream":true,}`},
+		{name: "trailing garbage", body: `{"stream":true}x`},
+		{name: "escaped key", body: `{"strea\u006d":true}`, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var scanner streamFlagScanner
+			for i := range len(tt.body) {
+				scanner.feed([]byte{tt.body[i]})
+			}
+			if got := scanner.streaming(); got != tt.want {
+				t.Fatalf("streaming() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStreamFlagScannerStorageRemainsBounded(t *testing.T) {
+	var unrelated streamFlagScanner
+	unrelated.feed([]byte(`{"payload":`))
+	chunk := []byte(strings.Repeat("1", 4096))
+	for range 256 {
+		unrelated.feed(chunk)
+	}
+	if got := len(unrelated.primitive); got != 0 {
+		t.Fatalf("unrelated primitive retained %d bytes, want 0", got)
+	}
+
+	var stream streamFlagScanner
+	stream.feed([]byte(`{"stream":`))
+	for range 256 {
+		stream.feed(chunk)
+	}
+	if got, max := len(stream.primitive), len("true")+1; got > max {
+		t.Fatalf("stream primitive retained %d bytes, want at most %d", got, max)
+	}
+}
+
+func TestEscapedStreamKeyComparisonDoesNotAllocate(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{key: `stream`, want: true},
+		{key: `strea\u006d`, want: true},
+		{key: `\u0073\u0074\u0072\u0065\u0061\u006d`, want: true},
+		{key: `\u0061`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			scanner := streamFlagScanner{key: []byte(tt.key)}
+			if got := scanner.keyIsStream(); got != tt.want {
+				t.Fatalf("keyIsStream() = %t, want %t", got, tt.want)
+			}
+			if allocations := testing.AllocsPerRun(1000, func() {
+				_ = scanner.keyIsStream()
+			}); allocations != 0 {
+				t.Fatalf("keyIsStream() allocations = %f, want 0", allocations)
+			}
+		})
+	}
 }
 
 func TestHealthReflectsBackendLiveness(t *testing.T) {

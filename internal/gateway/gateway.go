@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const minimumTokenLength = 24
+const (
+	minimumTokenLength             = 24
+	defaultStreamHeartbeatInterval = 15 * time.Second
+)
 
 type Config struct {
 	APIToken  string
@@ -34,6 +37,8 @@ type Handler struct {
 	backendClient *http.Client
 	limits        Limits
 	requestSlots  chan struct{}
+
+	streamHeartbeatInterval time.Duration
 }
 
 func New(config Config) (*Handler, error) {
@@ -63,22 +68,24 @@ func New(config Config) (*Handler, error) {
 	}
 
 	h := &Handler{
-		token:        config.APIToken,
-		backend:      cloneURL(config.Backend),
-		modelName:    config.ModelName,
-		version:      config.Version,
-		limits:       limits,
-		requestSlots: make(chan struct{}, limits.MaxConcurrentRequests),
+		token:                   config.APIToken,
+		backend:                 cloneURL(config.Backend),
+		modelName:               config.ModelName,
+		version:                 config.Version,
+		limits:                  limits,
+		requestSlots:            make(chan struct{}, limits.MaxConcurrentRequests),
+		streamHeartbeatInterval: defaultStreamHeartbeatInterval,
 		backendClient: &http.Client{
 			Transport: transport,
 			Timeout:   2 * time.Second,
 		},
 	}
 	h.proxy = &httputil.ReverseProxy{
-		Rewrite:       h.rewrite,
-		Transport:     transport,
-		FlushInterval: -1,
-		ErrorHandler:  h.proxyError,
+		Rewrite:        h.rewrite,
+		Transport:      transport,
+		FlushInterval:  -1,
+		ModifyResponse: prepareHeartbeatResponse,
+		ErrorHandler:   h.proxyError,
 	}
 	return h, nil
 }
@@ -124,7 +131,18 @@ func (h *Handler) serveV3(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, h.limits.MaxRequestBytes)
 	ctx, cancel := context.WithTimeout(r.Context(), h.limits.MaxRequestDuration)
 	defer cancel()
-	h.proxy.ServeHTTP(w, r.WithContext(ctx))
+	request := r.WithContext(ctx)
+	if !supportsStreamHeartbeat(request) {
+		h.proxy.ServeHTTP(w, request)
+		return
+	}
+
+	request.Header.Set("Accept-Encoding", "identity")
+	response := newHeartbeatResponseWriter(w, ctx, cancel, h.streamHeartbeatInterval)
+	defer response.stop()
+	request.Body = newStreamDetectingBody(request.Body, response.enable)
+	request = request.WithContext(context.WithValue(request.Context(), heartbeatWriterContextKey{}, response))
+	h.proxy.ServeHTTP(response, request)
 }
 
 func (h *Handler) authorized(values []string) bool {
@@ -320,6 +338,10 @@ func writeOpenAIError(w http.ResponseWriter, status int, message, kind, code str
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
+	if writer, ok := w.(*heartbeatResponseWriter); ok {
+		writer.writeJSON(status, value)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
