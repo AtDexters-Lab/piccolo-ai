@@ -1,0 +1,171 @@
+type: system
+
+inputs:
+  __app_address__:
+    type: string
+    label: "App Address"
+    description: "Subdomain for the protected Gemma bring-up status and API surface."
+    default: "gemma4"
+    required: true
+    validation:
+      regex: "^[a-z][a-z0-9]{0,15}$"
+      message: "Only lowercase letters and numbers; must start with a letter; max 16 chars."
+
+  ssh_public_key:
+    type: string
+    label: "SSH Public Key"
+    description: "One OpenSSH public-key line authorized for the developer user. Password and root login stay disabled."
+    required: true
+    validation:
+      regex: '^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+( [^\r\n]*)?$'
+      message: "Paste one complete OpenSSH public-key line."
+
+  parallel_slots:
+    type: int
+    label: "Parallel Slots"
+    description: "Start with 1 on the 12 GB N150 host. Change to 2 only after the single-slot GPU and OCR gates pass."
+    default: 1
+    required: true
+
+  context_size:
+    type: int
+    label: "Context Size"
+    description: "Per-server context budget. The bring-up default is intentionally memory-conscious."
+    default: 2048
+    required: true
+
+  prompt_cache_mib:
+    type: int
+    label: "Prompt Cache Limit (MiB)"
+    description: "Bounded in-memory prompt/prefix cache; independent from the OpenVINO compiled-graph cache."
+    default: 512
+    required: true
+
+artifacts:
+  language:
+    source:
+      type: huggingface
+      repository: unsloth/gemma-4-E4B-it-GGUF
+      revision: e1d90e5fb9f61d8dc71ef016580784a054e5c787
+      path: gemma-4-E4B-it-Q4_K_M.gguf
+      digest: sha256:519b9793ed6ce0ff530f1b7c96e848e08e49e7af4d57bb97f76215963a54146d
+
+  projector:
+    source:
+      type: huggingface
+      repository: unsloth/gemma-4-E4B-it-GGUF
+      revision: e1d90e5fb9f61d8dc71ef016580784a054e5c787
+      path: mmproj-BF16.gguf
+      digest: sha256:ee01cba03fd9c71ea2ea722225d24a84f72e7197714367e550ef705ef8851bc6
+
+primary_service: inference
+
+services:
+  inference:
+    # The first N150 image is intentionally a development release. Replace this
+    # tag with the published digest before installing on the target machine.
+    image: ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.1
+    bind_ports: [22, 8000, 8001]
+    environment:
+      PICCOLO_AI_SSH_PUBLIC_KEY: "{{ .Inputs.ssh_public_key }}"
+      PICCOLO_AI_PARALLEL_SLOTS: "{{ .Inputs.parallel_slots }}"
+      PICCOLO_AI_CONTEXT_SIZE: "{{ .Inputs.context_size }}"
+      PICCOLO_AI_BATCH_SIZE: "512"
+      PICCOLO_AI_UBATCH_SIZE: "128"
+      PICCOLO_AI_CACHE_RAM_MIB: "{{ .Inputs.prompt_cache_mib }}"
+      GGML_OPENVINO_DEVICE: "GPU"
+      GGML_OPENVINO_CACHE_DIR: "/var/lib/piccolo-ai/openvino-cache"
+      GGML_OPENVINO_CACHE_MAX_ENTRIES: "5"
+      GGML_OPENVINO_CACHE_LOG: "1"
+      GGML_OPENVINO_SUPPORTS_LOG: "1"
+    storage:
+      persistent:
+        state:
+          container: /var/lib/piccolo-ai
+          size_limit: 8GB
+        home:
+          container: /home/developer
+          size_limit: 2GB
+      artifacts:
+        language:
+          container: /models/language
+        projector:
+          container: /models/projector
+
+listeners:
+  - name: __primary
+    guest_port: 8000
+    flow: tcp
+    protocol: http
+    remote_ports: [80, 443]
+    auth:
+      rules:
+        - path: "/"
+          type: prefix
+          strategy: protected
+
+  - name: inference
+    guest_port: 8001
+    flow: tcp
+    protocol: http
+    remote_ports: [80, 443]
+    provides:
+      - capability: ai.inference.openai.v1
+        base_path: /v1
+    auth:
+      rules:
+        - path: "/"
+          type: prefix
+          strategy: protected
+
+  - name: ssh
+    guest_port: 22
+    flow: tcp
+    protocol: raw
+    tls_wrap: true
+    remote_ports: [443]
+    connection_auth:
+      mtls:
+        verifier:
+          type: piccolo_session
+
+resources:
+  priority: normal
+  memory:
+    min_required: 10GB
+    profile: elastic
+  storage:
+    max: 16GiB
+
+healthcheck:
+  http:
+    path: /healthz
+    timeout: 10s
+    retries: 5
+
+permissions:
+  network:
+    internet: deny
+    local_network: deny
+    dns: deny
+  resources:
+    max_processes: 512
+    max_open_files: 65536
+    privileged: false
+  filesystem:
+    read_only_root: true
+    device_access: deny
+
+x-piccolo:
+  mode: service
+  requires_features:
+    - connection_auth_mtls_v1
+    - capability_bindings_v1
+    - artifact_bindings_v1
+  tmpfs:
+    - /tmp
+    - /run
+    - /var/run
+    - /var/tmp
+  secrets:
+    injection: env

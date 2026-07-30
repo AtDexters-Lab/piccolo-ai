@@ -10,3 +10,14 @@ copyright Intel Corporation and contributors, licensed under the Apache License
 The upstream image and its license files remain present in the derived image.
 Piccolo AI's own source code is licensed under AGPL-3.0-only as stated in this
 repository's `LICENSE` file.
+
+The `piccolo-ai-llama-openvino` development container additionally packages a
+modified llama.cpp build, copyright the ggml authors and contributors, licensed
+under the MIT License. Source and license information are available at:
+
+- <https://github.com/AtDexters-Lab/gemma4-openvino>
+- <https://github.com/ggml-org/llama.cpp/blob/master/LICENSE>
+
+The exact llama.cpp license is copied into `/licenses/llama.cpp/LICENSE` in the
+derived image. OpenVINO Runtime and the Intel GPU userspace components remain
+under their respective upstream licenses.
