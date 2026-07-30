@@ -51,8 +51,12 @@ scripts/build-llama-openvino-image.sh
 
 The build script loads the image into the local Docker daemon and never pushes.
 The standalone manifest is
-`deploy/piccolo/gemma4-openvino-dev.app.yaml`; replace its image reference with
-the published digest before target installation.
+`deploy/piccolo/gemma4-openvino-dev.app.yaml` and pins the published development
+image by both tag and immutable registry digest:
+
+```text
+ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.1@sha256:74d89f1242961f597e7df64fd3e22f6caff9b4b187eb7b3a707f85543a2bbdc6
+```
 
 ## Target workflow
 

@@ -62,9 +62,7 @@ primary_service: inference
 
 services:
   inference:
-    # The first N150 image is intentionally a development release. Replace this
-    # tag with the published digest before installing on the target machine.
-    image: ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.1
+    image: ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.1@sha256:74d89f1242961f597e7df64fd3e22f6caff9b4b187eb7b3a707f85543a2bbdc6
     bind_ports: [22, 8000, 8001]
     environment:
       PICCOLO_AI_SSH_PUBLIC_KEY: "{{ .Inputs.ssh_public_key }}"
