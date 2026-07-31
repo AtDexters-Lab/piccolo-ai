@@ -1,0 +1,24 @@
+Port 22
+ListenAddress 0.0.0.0
+Protocol 2
+HostKey /var/lib/piccolo-ai/ssh/ssh_host_ed25519_key
+PidFile /run/piccolo-ai/sshd.pid
+AuthorizedKeysFile /run/piccolo-ai/authorized_keys
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin prohibit-password
+AllowUsers root
+StrictModes yes
+UsePAM no
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitTunnel no
+PermitTTY yes
+PrintMotd no
+Subsystem sftp internal-sftp
+LogLevel VERBOSE
