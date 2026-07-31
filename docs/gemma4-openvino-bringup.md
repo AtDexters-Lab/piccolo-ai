@@ -67,7 +67,7 @@ ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.1@sha256:74d89f1242961
 3. Connect using the exact SSH listener hostname:
 
    ```sh
-   ssh -o 'ProxyCommand=piccolo tunnel %h' developer@<ssh-listener-host>
+   ssh -o 'ProxyCommand=piccolo tunnel %h' root@<ssh-listener-host>
    ```
 
 4. Run `gemma diagnose`, then `gemma start`.

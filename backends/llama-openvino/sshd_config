@@ -10,8 +10,8 @@ PasswordAuthentication no
 PermitEmptyPasswords no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
-PermitRootLogin no
-AllowUsers developer
+PermitRootLogin prohibit-password
+AllowUsers root
 StrictModes yes
 UsePAM no
 X11Forwarding no

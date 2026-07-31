@@ -14,7 +14,7 @@ inputs:
   ssh_public_key:
     type: string
     label: "SSH Public Key"
-    description: "One OpenSSH public-key line authorized for the developer user. Password and root login stay disabled."
+    description: "One OpenSSH public-key line authorized for key-only root access in this development bring-up image. Password login stays disabled."
     required: true
     validation:
       regex: '^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]+( [^\r\n]*)?$'
@@ -152,9 +152,9 @@ healthcheck:
 
 permissions:
   network:
-    internet: deny
-    local_network: deny
-    dns: deny
+    internet: allow
+    local_network: allow
+    dns: allow
   resources:
     max_processes: 512
     max_open_files: 65536

@@ -58,7 +58,7 @@ chmod 0644 "${host_key}.pub"
 
 echo "Piccolo AI Gemma 4 bring-up container initialized"
 cat /etc/piccolo-ai/source-state
-echo "Model startup is intentionally manual. Connect over SSH and run: gemma start"
+echo "Model startup is intentionally manual. Connect as root over SSH and run: gemma start"
 
 cleanup
 trap - EXIT
