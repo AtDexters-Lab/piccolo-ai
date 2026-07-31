@@ -42,6 +42,7 @@ ARG PICCOLO_AI_PATCH_SHA256=unknown
 ARG LLAMA_REVISION=unknown
 ARG LLAMA_PATCH_SHA256=unknown
 ARG OPENVINO_VERSION=unknown
+ARG CPU_TARGET=unknown
 
 LABEL org.opencontainers.image.title="Piccolo AI Gemma 4 OpenVINO Bring-up Provider" \
       org.opencontainers.image.description="SSH-enabled llama.cpp/OpenVINO GPU bring-up provider for Piccolo OS" \
@@ -53,7 +54,8 @@ LABEL org.opencontainers.image.title="Piccolo AI Gemma 4 OpenVINO Bring-up Provi
       com.atdexters.piccolo-ai.patch-sha256="${PICCOLO_AI_PATCH_SHA256}" \
       com.atdexters.piccolo-ai.llama-revision="${LLAMA_REVISION}" \
       com.atdexters.piccolo-ai.llama-patch-sha256="${LLAMA_PATCH_SHA256}" \
-      com.atdexters.piccolo-ai.openvino-version="${OPENVINO_VERSION}"
+      com.atdexters.piccolo-ai.openvino-version="${OPENVINO_VERSION}" \
+      com.atdexters.piccolo-ai.cpu-target="${CPU_TARGET}"
 
 # The build script constructs this named context from an explicit runtime
 # allowlist and preserves its shared-library symlinks.
@@ -94,6 +96,7 @@ RUN chmod 0755 \
         "llama.cpp=${LLAMA_REVISION}" \
         "llama.patch.sha256=${LLAMA_PATCH_SHA256}" \
         "openvino=${OPENVINO_VERSION}" \
+        "cpu.target=${CPU_TARGET}" \
         > /etc/piccolo-ai/source-state
 
 ENV PATH="/opt/llama/bin:${PATH}" \

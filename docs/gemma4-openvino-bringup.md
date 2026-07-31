@@ -44,6 +44,7 @@ cd /home/abhishek-borar/projects/piccolo/piccolo-ai
 LLAMA_CPP_SOURCE=/path/to/gemma4-openvino/llama.cpp \
 LLAMA_BUILD_DIR=/path/to/gemma4-openvino/llama.cpp/build/ReleaseOV/bin \
 OPENVINO_RUNTIME=/path/to/openvino-toolkit \
+TARGET_CPU=gracemont \
 IMAGE=ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.2 \
 VERSION=0.1.0-dev.2 \
 scripts/build-llama-openvino-image.sh

@@ -7,12 +7,14 @@ Usage:
   LLAMA_CPP_SOURCE=/path/to/llama.cpp \
   LLAMA_BUILD_DIR=/path/to/llama.cpp/build/ReleaseOV/bin \
   OPENVINO_RUNTIME=/path/to/openvino-toolkit \
+  TARGET_CPU=gracemont \
   IMAGE=piccolo-ai-llama-openvino:dev \
   scripts/build-llama-openvino-image.sh
 
-The script first refreshes the required binaries in the existing OpenVINO build
-tree, then packages that exact build and the local llama.cpp source state. It
-builds the container locally only; it never pushes an image.
+The script reconfigures the existing OpenVINO build for the requested target
+CPU, refreshes the required binaries, then packages that exact build and the
+local llama.cpp source state. TARGET_CPU defaults to gracemont for the N150
+bring-up host. It builds the container locally only; it never pushes an image.
 EOF
 }
 
@@ -29,6 +31,11 @@ fi
 
 image=${IMAGE:-piccolo-ai-llama-openvino:dev}
 version=${VERSION:-dev}
+target_cpu=${TARGET_CPU:-gracemont}
+if [[ ! "${target_cpu}" =~ ^[A-Za-z0-9_.+-]+$ ]]; then
+    echo "TARGET_CPU contains unsupported characters: ${target_cpu}" >&2
+    exit 2
+fi
 llama_source=$(realpath -e "${LLAMA_CPP_SOURCE}")
 llama_build_dir=$(realpath -e "${LLAMA_BUILD_DIR:-${llama_source}/build/ReleaseOV/bin}")
 llama_cmake_dir=$(dirname "${llama_build_dir}")
@@ -58,6 +65,41 @@ if [[ -z "${cache_openvino}" || $(realpath -e "${cache_openvino}") != "${expecte
     echo "CMake build tree does not use OPENVINO_RUNTIME: ${cache_openvino:-missing}" >&2
     exit 1
 fi
+
+target_flags="-march=${target_cpu} -mtune=${target_cpu}"
+cmake -S "${llama_source}" -B "${llama_cmake_dir}" \
+    -DGGML_NATIVE=OFF \
+    -DGGML_SSE42=ON \
+    -DGGML_AVX=ON \
+    -DGGML_AVX2=ON \
+    -DGGML_AVX_VNNI=ON \
+    -DGGML_BMI2=ON \
+    -DGGML_F16C=ON \
+    -DGGML_FMA=ON \
+    -DGGML_AVX512=OFF \
+    -DGGML_AVX512_VBMI=OFF \
+    -DGGML_AVX512_VNNI=OFF \
+    -DGGML_AVX512_BF16=OFF \
+    -DGGML_AMX_TILE=OFF \
+    -DGGML_AMX_INT8=OFF \
+    -DGGML_AMX_BF16=OFF \
+    -DCMAKE_C_FLAGS="${target_flags}" \
+    -DCMAKE_CXX_FLAGS="${target_flags}"
+
+compile_commands="${llama_cmake_dir}/compile_commands.json"
+if [[ ! -s "${compile_commands}" ]]; then
+    echo "CMake did not emit compile_commands.json" >&2
+    exit 1
+fi
+if grep -Fq -- "-march=native" "${compile_commands}"; then
+    echo "refusing to package a host-native llama.cpp build" >&2
+    exit 1
+fi
+if ! grep -Fq -- "-march=${target_cpu}" "${compile_commands}"; then
+    echo "llama.cpp build does not contain target CPU flag -march=${target_cpu}" >&2
+    exit 1
+fi
+
 openvino_version=$(tr -d '\r\n' < "${openvino_runtime}/runtime/version.txt")
 if [[ -z "${openvino_version}" ]]; then
     echo "OpenVINO runtime version is empty" >&2
@@ -132,6 +174,7 @@ echo "piccolo_ai_patch_sha256=${piccolo_patch_sha256}"
 echo "llama_revision=${llama_revision}"
 echo "llama_patch_sha256=${llama_patch_sha256}"
 echo "openvino_version=${openvino_version}"
+echo "target_cpu=${target_cpu}"
 
 docker buildx build \
     --load \
@@ -147,4 +190,5 @@ docker buildx build \
     --build-arg "LLAMA_REVISION=${llama_revision}" \
     --build-arg "LLAMA_PATCH_SHA256=${llama_patch_sha256}" \
     --build-arg "OPENVINO_VERSION=${openvino_version}" \
+    --build-arg "CPU_TARGET=${target_cpu}" \
     .
