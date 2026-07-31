@@ -45,8 +45,8 @@ LLAMA_CPP_SOURCE=/path/to/gemma4-openvino/llama.cpp \
 LLAMA_BUILD_DIR=/path/to/gemma4-openvino/llama.cpp/build/ReleaseOV/bin \
 OPENVINO_RUNTIME=/path/to/openvino-toolkit \
 TARGET_CPU=gracemont \
-IMAGE=ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.2 \
-VERSION=0.1.0-dev.2 \
+IMAGE=ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.3 \
+VERSION=0.1.0-dev.3 \
 scripts/build-llama-openvino-image.sh
 ```
 
@@ -56,7 +56,7 @@ The standalone manifest is
 image by both tag and immutable registry digest:
 
 ```text
-ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.2@sha256:d313eef3ffb56b95445ce9981b0ffb62d3500a73ca909081c77e65e9c1a73384
+ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.3@sha256:1fa6d2a05649cf1db78dde2f78981ea36ced0d7ebebf886b6f9d7127d22b3da8
 ```
 
 ## Target workflow

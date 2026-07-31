@@ -71,7 +71,7 @@ primary_service: inference
 
 services:
   inference:
-    image: ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.2@sha256:d313eef3ffb56b95445ce9981b0ffb62d3500a73ca909081c77e65e9c1a73384
+    image: ghcr.io/atdexters-lab/piccolo-ai-llama-openvino:0.1.0-dev.3@sha256:1fa6d2a05649cf1db78dde2f78981ea36ced0d7ebebf886b6f9d7127d22b3da8
     bind_ports: [22, 8000, 8001]
     environment:
       PICCOLO_AI_SSH_PUBLIC_KEY: "{{ .Inputs.ssh_public_key }}"
