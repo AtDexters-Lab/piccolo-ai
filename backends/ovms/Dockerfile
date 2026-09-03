@@ -1,6 +1,6 @@
 # Dependabot updates only the first FROM in a Dockerfile; keep the
 # security-critical runtime there and derive the final image from this stage.
-FROM openvino/model_server:2026.2-gpu@sha256:fdc34725b35d79cde23cff1967f90efb40237b7cf5545a70460209056f3da733 AS ovms
+FROM openvino/model_server:2026.3.1-gpu@sha256:52c86504cc2f4a86c2c58b558656bf8f6b52745c7bef123b262ac9f8841f4533 AS ovms
 
 FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS build
 
